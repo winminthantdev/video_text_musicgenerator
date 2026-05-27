@@ -92,20 +92,23 @@ async def generate_video(
 
     command.extend(["-i", audio_path, "-t", str(duration)])
 
-    sub_style = "Fontname=Pyidaungsu,Fontsize=22,Outline=1,Alignment=2"
+    sub_style = "Fontname=Pyidaungsu,Fontsize=22,Outline=1,Alignment=2"\
+
+    scale_fix = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
+
     filter_complex = ""
 
     if has_text and has_sub:
-        filter_complex = f"[0:v][1:v]overlay=0:0:eof_action=repeat[vbg];[vbg]subtitles={sub_path}:force_style='{sub_style}'[v]"
+        filter_complex = f"[0:v][1:v]overlay=0:0:eof_action=repeat,{scale_fix}[vbg];[vbg]subtitles={sub_path}:force_style='{sub_style}'[v]"
     elif has_text:
-        filter_complex = "[0:v][1:v]overlay=0:0:eof_action=repeat[v]"
+        filter_complex = f"[0:v][1:v]overlay=0:0:eof_action=repeat,{scale_fix}[v]"
     elif has_sub:
-        filter_complex = f"[0:v]subtitles={sub_path}:force_style='{sub_style}'[v]"
+        filter_complex = f"[0:v]{scale_fix},subtitles={sub_path}:force_style='{sub_style}'[v]"
 
     if filter_complex:
         command.extend(["-filter_complex", filter_complex, "-map", "[v]"])
     else:
-        command.extend(["-map", "0:v:0"])
+        command.extend(["-vf", scale_fix, "-map", "0:v:0"])
 
     audio_idx = "2:a:0" if has_text else "1:a:0"
     command.extend(["-map", audio_idx, "-c:v", "libx264", "-c:a", "aac", output_filename])
