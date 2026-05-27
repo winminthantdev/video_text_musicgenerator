@@ -1,25 +1,18 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, Form
 from PIL import Image, ImageDraw, ImageFont
 import subprocess
 import os
 import textwrap
+import shutil
 
-app = FastAPI(title="TikTok Auto Video API (Subtitles Support)")
+app = FastAPI(title="TikTok Auto Video API (n8n File Upload Version)")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-class VideoPayload(BaseModel):
-    text_content: str = ""
-    background_video: str = "background.mp4"
-    audio_track: str = "music.m4a"
-    subtitle_file: str = ""
-
-
 @app.get("/")
 def home():
-    return {"status": "API is running with Subtitle capabilities!"}
+    return {"status": "API is ready to receive files from n8n!"}
 
 
 def get_audio_duration(audio_path):
@@ -52,52 +45,62 @@ def create_text_image(text, font_path, image_width=1080, image_height=1920):
 
             y_text += line_height + 20
 
-        output_path = "temp_text.png"
-        img.save(os.path.join(PROJECT_DIR, output_path))
+        output_path = os.path.join(PROJECT_DIR, "temp_text.png")
+        img.save(output_path)
         return output_path
     except Exception as e:
-        print(f"Error creating text image: {e}")
         return None
 
 
+# ------------------------------------------------------------------------
+# ------------------------------------------------------------------------
 @app.post("/generate-video")
-def generate_video(payload: VideoPayload):
-    abs_bg = os.path.join(PROJECT_DIR, payload.background_video)
-    abs_audio = os.path.join(PROJECT_DIR, payload.audio_track)
-    abs_font = os.path.join(PROJECT_DIR, "Pyidaungsu.ttf")
+async def generate_video(
+        text_content: str = Form(""),
+        background_video: UploadFile = File(...),
+        audio_track: UploadFile = File(...),
+        subtitle_file: UploadFile = File(None)  # Optional
+):
+    bg_path = os.path.join(PROJECT_DIR, f"temp_{background_video.filename}")
+    with open(bg_path, "wb") as buffer:
+        shutil.copyfileobj(background_video.file, buffer)
 
-    if not os.path.exists(abs_bg):
-        return {"status": "error", "message": f"Background video not found: {abs_bg}"}
-    if not os.path.exists(abs_audio):
-        return {"status": "error", "message": f"Audio track not found: {abs_audio}"}
+    audio_path = os.path.join(PROJECT_DIR, f"temp_{audio_track.filename}")
+    with open(audio_path, "wb") as buffer:
+        shutil.copyfileobj(audio_track.file, buffer)
 
-    has_sub = bool(payload.subtitle_file.strip())
-    if has_sub:
-        abs_sub = os.path.join(PROJECT_DIR, payload.subtitle_file)
-        if not os.path.exists(abs_sub):
-            return {"status": "error", "message": f"Subtitle file not found: {abs_sub}"}
+    sub_path = None
+    has_sub = False
+    if subtitle_file and subtitle_file.filename:
+        has_sub = True
+        sub_path = os.path.join(PROJECT_DIR, f"temp_{subtitle_file.filename}")
+        with open(sub_path, "wb") as buffer:
+            shutil.copyfileobj(subtitle_file.file, buffer)
 
-    duration = get_audio_duration(abs_audio)
-    has_text = bool(payload.text_content.strip())
+    font_path = os.path.join(PROJECT_DIR, "Pyidaungsu.ttf")
+    output_filename = os.path.join(PROJECT_DIR, "output.mp4")
+    duration = get_audio_duration(audio_path)
+    has_text = bool(text_content.strip())
 
+    # FFmpeg Command
+    command = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", bg_path]
 
-    command = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", payload.background_video]
-
+    text_image_path = None
     if has_text:
-        create_text_image(payload.text_content, abs_font)
-        command.extend(["-i", "temp_text.png"])
+        text_image_path = create_text_image(text_content, font_path)
+        command.extend(["-i", text_image_path])
 
-    command.extend(["-i", payload.audio_track, "-t", str(duration)])
+    command.extend(["-i", audio_path, "-t", str(duration)])
 
-    sub_style = "Fontname=Zawgyi-One,Fontsize=22,Outline=1,Alignment=2"
+    sub_style = "Fontname=Pyidaungsu,Fontsize=22,Outline=1,Alignment=2"
     filter_complex = ""
 
     if has_text and has_sub:
-        filter_complex = f"[0:v][1:v]overlay=0:0:eof_action=repeat[vbg];[vbg]subtitles={payload.subtitle_file}:force_style='{sub_style}'[v]"
+        filter_complex = f"[0:v][1:v]overlay=0:0:eof_action=repeat[vbg];[vbg]subtitles={sub_path}:force_style='{sub_style}'[v]"
     elif has_text:
         filter_complex = "[0:v][1:v]overlay=0:0:eof_action=repeat[v]"
     elif has_sub:
-        filter_complex = f"[0:v]subtitles={payload.subtitle_file}:force_style='{sub_style}'[v]"
+        filter_complex = f"[0:v]subtitles={sub_path}:force_style='{sub_style}'[v]"
 
     if filter_complex:
         command.extend(["-filter_complex", filter_complex, "-map", "[v]"])
@@ -105,26 +108,26 @@ def generate_video(payload: VideoPayload):
         command.extend(["-map", "0:v:0"])
 
     audio_idx = "2:a:0" if has_text else "1:a:0"
-    command.extend(["-map", audio_idx, "-c:v", "libx264", "-c:a", "aac", "output.mp4"])
+    command.extend(["-map", audio_idx, "-c:v", "libx264", "-c:a", "aac", output_filename])
 
     try:
         print(f"Generating video... Text: {has_text}, Subtitles: {has_sub}")
-
         result = subprocess.run(command, capture_output=True, text=True, cwd=PROJECT_DIR)
 
         if result.returncode != 0:
             return {"status": "error", "message": "FFmpeg Failed", "details": result.stderr}
 
-        # ရှင်းလင်းရေး
-        temp_img = os.path.join(PROJECT_DIR, "temp_text.png")
-        if os.path.exists(temp_img):
-            os.remove(temp_img)
-
         return {
             "status": "success",
-            "message": f"Video generated successfully! (Duration: {duration}s)",
-            "video_url": os.path.join(PROJECT_DIR, "output.mp4")
+            "message": "Video generated successfully!",
+            "video_url": output_filename
         }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+    finally:
+        if os.path.exists(bg_path): os.remove(bg_path)
+        if os.path.exists(audio_path): os.remove(audio_path)
+        if sub_path and os.path.exists(sub_path): os.remove(sub_path)
+        if text_image_path and os.path.exists(text_image_path): os.remove(text_image_path)
