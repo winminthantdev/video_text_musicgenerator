@@ -5,21 +5,21 @@ import subprocess
 import os
 import textwrap
 
-app = FastAPI(title="TikTok Auto Video API (Optional Text & Dynamic Audio)")
+app = FastAPI(title="TikTok Auto Video API (Subtitles Support)")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# Made text_content default to an empty string so it's optional
 class VideoPayload(BaseModel):
     text_content: str = ""
     background_video: str = "background.mp4"
-    audio_track: str = "music.m4a"  # Defaulting to your m4a preference
+    audio_track: str = "music.m4a"
+    subtitle_file: str = ""
 
 
 @app.get("/")
 def home():
-    return {"status": "API is running!"}
+    return {"status": "API is running with Subtitle capabilities!"}
 
 
 def get_audio_duration(audio_path):
@@ -38,7 +38,7 @@ def create_text_image(text, font_path, image_width=1080, image_height=1920):
         draw = ImageDraw.Draw(img)
         font = ImageFont.truetype(font_path, 60)
         lines = textwrap.wrap(text, width=25)
-        y_text = (image_height / 2) - 100
+        y_text = (image_height / 2) - 150
 
         for line in lines:
             bbox = draw.textbbox((0, 0), line, font=font)
@@ -52,8 +52,8 @@ def create_text_image(text, font_path, image_width=1080, image_height=1920):
 
             y_text += line_height + 20
 
-        output_path = os.path.join(PROJECT_DIR, "temp_text.png")
-        img.save(output_path)
+        output_path = "temp_text.png"
+        img.save(os.path.join(PROJECT_DIR, output_path))
         return output_path
     except Exception as e:
         print(f"Error creating text image: {e}")
@@ -62,77 +62,68 @@ def create_text_image(text, font_path, image_width=1080, image_height=1920):
 
 @app.post("/generate-video")
 def generate_video(payload: VideoPayload):
-    bg_path = os.path.join(PROJECT_DIR, payload.background_video)
-    audio_path = os.path.join(PROJECT_DIR, payload.audio_track)
-    font_path = os.path.join(PROJECT_DIR, "Pyidaungsu.ttf")
-    output_filename = os.path.join(PROJECT_DIR, "output.mp4")
+    abs_bg = os.path.join(PROJECT_DIR, payload.background_video)
+    abs_audio = os.path.join(PROJECT_DIR, payload.audio_track)
+    abs_font = os.path.join(PROJECT_DIR, "Pyidaungsu.ttf")
 
-    if not os.path.exists(bg_path):
-        return {"status": "error", "message": f"Background video not found: {bg_path}"}
-    if not os.path.exists(audio_path):
-        return {"status": "error", "message": f"Audio track not found: {audio_path}"}
+    if not os.path.exists(abs_bg):
+        return {"status": "error", "message": f"Background video not found: {abs_bg}"}
+    if not os.path.exists(abs_audio):
+        return {"status": "error", "message": f"Audio track not found: {abs_audio}"}
 
-    duration = get_audio_duration(audio_path)
+    has_sub = bool(payload.subtitle_file.strip())
+    if has_sub:
+        abs_sub = os.path.join(PROJECT_DIR, payload.subtitle_file)
+        if not os.path.exists(abs_sub):
+            return {"status": "error", "message": f"Subtitle file not found: {abs_sub}"}
 
-    # Check if user provided any text (ignores just spaces/newlines)
+    duration = get_audio_duration(abs_audio)
     has_text = bool(payload.text_content.strip())
-    text_image_path = None
+
+
+    command = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", payload.background_video]
 
     if has_text:
-        # IF TEXT EXISTS: Create image and overlay it
-        if not os.path.exists(font_path):
-            return {"status": "error", "message": f"Font file not found: {font_path}"}
+        create_text_image(payload.text_content, abs_font)
+        command.extend(["-i", "temp_text.png"])
 
-        text_image_path = create_text_image(payload.text_content, font_path)
-        if not text_image_path:
-            return {"status": "error", "message": "Failed to create text overlay image."}
+    command.extend(["-i", payload.audio_track, "-t", str(duration)])
 
-        command = [
-            "ffmpeg", "-y",
-            "-stream_loop", "-1",
-            "-i", bg_path,  # Input 0: Video
-            "-i", text_image_path,  # Input 1: Image
-            "-i", audio_path,  # Input 2: Audio
-            "-t", str(duration),
-            "-filter_complex", "[0:v][1:v]overlay=0:0:eof_action=repeat[v]",
-            "-map", "[v]",
-            "-map", "2:a",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            output_filename
-        ]
+    sub_style = "Fontname=Zawgyi-One,Fontsize=22,Outline=1,Alignment=2"
+    filter_complex = ""
+
+    if has_text and has_sub:
+        filter_complex = f"[0:v][1:v]overlay=0:0:eof_action=repeat[vbg];[vbg]subtitles={payload.subtitle_file}:force_style='{sub_style}'[v]"
+    elif has_text:
+        filter_complex = "[0:v][1:v]overlay=0:0:eof_action=repeat[v]"
+    elif has_sub:
+        filter_complex = f"[0:v]subtitles={payload.subtitle_file}:force_style='{sub_style}'[v]"
+
+    if filter_complex:
+        command.extend(["-filter_complex", filter_complex, "-map", "[v]"])
     else:
-        # IF NO TEXT: Just combine looping video and audio
-        command = [
-            "ffmpeg", "-y",
-            "-stream_loop", "-1",
-            "-i", bg_path,  # Input 0: Video
-            "-i", audio_path,  # Input 1: Audio
-            "-t", str(duration),
-            "-map", "0:v:0",  # Take video from Input 0
-            "-map", "1:a:0",  # Take audio from Input 1
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            output_filename
-        ]
+        command.extend(["-map", "0:v:0"])
+
+    audio_idx = "2:a:0" if has_text else "1:a:0"
+    command.extend(["-map", audio_idx, "-c:v", "libx264", "-c:a", "aac", "output.mp4"])
 
     try:
-        mode = "with text overlay" if has_text else "without text overlay"
-        print(f"Starting Video Generation ({mode}) for duration: {duration} seconds")
+        print(f"Generating video... Text: {has_text}, Subtitles: {has_sub}")
 
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(command, capture_output=True, text=True, cwd=PROJECT_DIR)
 
         if result.returncode != 0:
             return {"status": "error", "message": "FFmpeg Failed", "details": result.stderr}
 
-        # Clean up temp image if it was created
-        if text_image_path and os.path.exists(text_image_path):
-            os.remove(text_image_path)
+        # ရှင်းလင်းရေး
+        temp_img = os.path.join(PROJECT_DIR, "temp_text.png")
+        if os.path.exists(temp_img):
+            os.remove(temp_img)
 
         return {
             "status": "success",
-            "message": f"Video generated successfully {mode}!",
-            "video_url": output_filename
+            "message": f"Video generated successfully! (Duration: {duration}s)",
+            "video_url": os.path.join(PROJECT_DIR, "output.mp4")
         }
 
     except Exception as e:
